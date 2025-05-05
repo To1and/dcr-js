@@ -6,6 +6,7 @@ class DCRModeler {
     importXML(xml: string): Promise<void>;
     importCustomXML(xml: string): Promise<void>;
     importDCRPortalXML(xml: string): Promise<void>;
+    importBPMNXML(xml: string): Promise<void>;
 
     saveXML(options: { format: boolean }): Promise<{ xml: string }>;
     saveDCRXML(): Promise<{ xml: string }>
