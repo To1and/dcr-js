@@ -25,6 +25,7 @@ import Label from '../utilComponents/Label';
 import Loading from '../utilComponents/Loading';
 import { DCRGraph, layoutGraph, moddleToDCR, nestDCR, Nestings } from 'dcr-engine';
 import GraphNameInput from '../utilComponents/GraphNameInput';
+import { convertBPMNToDCRWithPyodide } from './pyodideBPMNConverter';
 
 const initGraphName = "DCR-JS Graph"
 
@@ -150,6 +151,64 @@ const ModelerState = ({ setState, savedGraphs, setSavedGraphs, lastSavedGraph }:
               <FileUpload accept="text/xml" fileCallback={(name, contents) => { open(contents, modelerRef.current?.importDCRPortalXML, name); setMenuOpen(false); }}>
                 <div />
                 <>Open DCR Solution XML</>
+              </FileUpload>
+            </StyledFileUpload>),
+        },
+        {
+          customElement: (
+            <StyledFileUpload>
+              <FileUpload accept="text/xml,.bpmn" fileCallback={async (name, contents) => {
+                setMenuOpen(false);
+                setLoading(true);
+                try {
+
+                  const dcrXml = await convertBPMNToDCRWithPyodide(contents);
+                  
+                  if (modelerRef.current?.importDCRPortalXML) {
+                    await modelerRef.current.importDCRPortalXML(dcrXml);
+                    setGraphName(name.replace(/\.(bpmn|xml)$/, ''));
+                    setGraphId("");
+                    
+                    const elementRegistry = modelerRef.current?.getElementRegistry();
+                    if (elementRegistry) {
+                      const events = Object.values(elementRegistry._elements)
+                        .filter((element: any) => element.element.id.includes("Event"));
+                      const uniqueActivities = new Set(events.map((element: any) => element.element.businessObject.description));
+                      
+                      if (events.length === uniqueActivities.size && !uniqueActivities.has("")) {
+                        try {
+                          const graph = moddleToDCR(elementRegistry, true);
+                          const nestings = nestDCR(graph);
+                          const params: [DCRGraph, Nestings] = [nestings.nestedGraph, nestings];
+                          
+                          const nestedXml = await layoutGraph(...params);
+                          await modelerRef.current.importXML(nestedXml);
+                          
+                          toast.success("BPMN successfully converted to DCR and nested!");
+                        } catch (nestError) {
+                          console.error("Error nesting graph:", nestError);
+                          toast.warning("BPMN converted but nesting failed");
+                        }
+                      } else {
+                        toast.warning("Automatic nesting skipped due to empty or duplicate activity names");
+                      }
+                    }
+                  }
+                } catch (error) {
+                  console.error("Error converting BPMN:", error);
+                  let message = "Unknown error";
+                  if (typeof error === "object" && error !== null && "message" in error && typeof (error as any).message === "string") {
+                    message = (error as any).message;
+                  } else if (typeof error === "string") {
+                    message = error;
+                  }
+                  toast.error(`Failed to convert BPMN to DCR: ${message}`);
+                } finally {
+                  setLoading(false);
+                }
+              }}>
+                <div />
+                <>Open BPMN 2.0 XML</>
               </FileUpload>
             </StyledFileUpload>),
         },
