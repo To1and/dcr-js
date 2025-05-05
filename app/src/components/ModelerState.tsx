@@ -196,7 +196,13 @@ const ModelerState = ({ setState, savedGraphs, setSavedGraphs, lastSavedGraph }:
                   }
                 } catch (error) {
                   console.error("Error converting BPMN:", error);
-                  toast.error(`Failed to convert BPMN to DCR: ${error.message}`);
+                  let message = "Unknown error";
+                  if (typeof error === "object" && error !== null && "message" in error && typeof (error as any).message === "string") {
+                    message = (error as any).message;
+                  } else if (typeof error === "string") {
+                    message = error;
+                  }
+                  toast.error(`Failed to convert BPMN to DCR: ${message}`);
                 } finally {
                   setLoading(false);
                 }
