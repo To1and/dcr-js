@@ -631,72 +631,122 @@ class BPMNAnalyzer:
                     if flow and flow.get('target_ref'):
                         self.bpmn_data.add_bpmn_marking(
                             flow.get('target_ref'), "J+", gw_id)
+                        
 
+# In class BPMNAnalyzer:
     def perform_precondition_checks(self):
         if not self.bpmn_data:
-            return False, ["BPMN data not loaded."]
-        error_messages = []
-        overall_passed = True
+            return False, ["● BPMN data not loaded."] # Consistent bullet for all messages from this method
+        
+        # Flags to track error types
+        error_occurred = False
+        start_event_count_details = None # To store "found X"
+        start_event_needs_zero_incoming_error = False
+        start_event_needs_one_outgoing_error = False
+        end_event_min_count_error = False
+        end_event_needs_one_incoming_error = False
+        end_event_needs_zero_outgoing_error = False
+        gateway_invalid_flow_error = False
+        first_gateway_invalid_flow_example = None # To store (in, out) for example
+        unpaired_structural_gateway_error = False
+        task_like_element_invalid_flow_error = False
 
-        start_events = [
-            e for e in self.bpmn_data.elements.values() if e['type'] == 'startEvent']
+        # --- Check Start Event Count and Flows ---
+        start_events = [el for el_id, el in self.bpmn_data.elements.items() if el['type'] == 'startEvent']
         if len(start_events) != 1:
-            overall_passed = False
-            msg = f"Expected 1 Start Event, found {len(start_events)}."
-            error_messages.append(msg)
-            for i, e_item in enumerate(start_events):
-                error_messages.append(
-                    f"  - Start Event {i+1}: ID '{e_item['id']}', Name: '{e_item.get('name', 'N/A')}'")
+            error_occurred = True
+            start_event_count_details = f"found {len(start_events)}"
+        elif len(start_events) == 1: 
+            start_event = start_events[0]
+            num_in_start = len(start_event.get('incoming_flow_ids', []))
+            num_out_start = len(start_event.get('outgoing_flow_ids', []))
+            if num_in_start != 0:
+                error_occurred = True
+                start_event_needs_zero_incoming_error = True
+            if num_out_start != 1:
+                error_occurred = True
+                start_event_needs_one_outgoing_error = True
 
-        end_events = [e for e in self.bpmn_data.elements.values()
-                      if e['type'] == 'endEvent']
+        # --- Check End Event Existence and Flows ---
+        end_events = [el for el_id, el in self.bpmn_data.elements.items() if el['type'] == 'endEvent']
         if not end_events:
-            overall_passed = False
-            error_messages.append("Expected at least 1 End Event, found 0.")
+            error_occurred = True
+            end_event_min_count_error = True
+        else:
+            for end_event in end_events:
+                num_in_end = len(end_event.get('incoming_flow_ids', []))
+                num_out_end = len(end_event.get('outgoing_flow_ids', []))
+                if num_in_end != 1:
+                    error_occurred = True
+                    end_event_needs_one_incoming_error = True
+                if num_out_end != 0:
+                    error_occurred = True
+                    end_event_needs_zero_outgoing_error = True
 
-        gateways = [el for el in self.bpmn_data.elements.values()
-                    if el['type'].endswith('Gateway')]
-        unpaired_structural_gateways = []
-        sese_violations = []
-
+        # --- Check Gateway Rules ---
+        gateways = [el for el_id, el in self.bpmn_data.elements.items() if el['type'].endswith('Gateway')]
         for gw in gateways:
-            direction = gw.get('gateway_direction')
             num_in = len(gw.get('incoming_flow_ids', []))
             num_out = len(gw.get('outgoing_flow_ids', []))
-            is_structural_for_pairing = gw.get('gateway_type') in [
-                'parallel', 'exclusive', 'inclusive'] and direction in ['split', 'join']
+            is_valid_split = (num_in == 1 and num_out > 1)
+            is_valid_join = (num_in > 1 and num_out == 1)
 
-            if is_structural_for_pairing and gw.get('paired_gateway_id') is None and gw.get('loop_type') is None:
-                overall_passed = False
-                unpaired_structural_gateways.append(
-                    f"  - ID: {gw['id']}, Name: {gw.get('name') or gw['id']}, Type: {gw.get('gateway_type')}, Dir: {direction}. Expected pair.")
+            if not (is_valid_split or is_valid_join):
+                error_occurred = True
+                gateway_invalid_flow_error = True
+                if first_gateway_invalid_flow_example is None:
+                    first_gateway_invalid_flow_example = (num_in, num_out)
+            
+            if gw.get('gateway_type') in ['parallel', 'exclusive', 'inclusive']:
+                if is_valid_split or is_valid_join: 
+                    if gw.get('paired_gateway_id') is None and gw.get('loop_type') is None:
+                        error_occurred = True
+                        unpaired_structural_gateway_error = True
+        
+        # --- Check Task/Other Element Flows ---
+        other_elements = [el for el_id, el in self.bpmn_data.elements.items()
+                          if not el['type'].endswith('Gateway') and \
+                             el['type'] not in ['startEvent', 'endEvent']]
+        for element in other_elements: 
+            num_in_el = len(element.get('incoming_flow_ids', []))
+            num_out_el = len(element.get('outgoing_flow_ids', []))
+            if not (num_in_el == 1 and num_out_el == 1):
+                error_occurred = True
+                task_like_element_invalid_flow_error = True
+                break # One instance is enough to report this type of error
 
-            sese_reason = ""
-            if direction == 'split' and not (num_in == 1 and num_out > 1):
-                sese_reason = f"Split violation (In:{num_in}/Out:{num_out})"
-            elif direction == 'join' and not (num_in > 1 and num_out == 1):
-                sese_reason = f"Join violation (In:{num_in}/Out:{num_out})"
-            elif direction == 'routing_decision_point' and gw.get('gateway_type') in ['parallel', 'inclusive']:
-                sese_reason = f"1-in/1-out for {gw.get('gateway_type')} is unusual."
-            elif direction == 'undefined_or_complex':
-                sese_reason = f"Undefined flow (In:{num_in}/Out:{num_out})"
+        # --- Construct final error messages ---
+        final_error_messages = []
+        if start_event_count_details:
+            final_error_messages.append(f"● Expected 1 Start Event, {start_event_count_details}.")
+        if start_event_needs_zero_incoming_error:
+            final_error_messages.append("● Start Event must have 0 incoming flows.")
+        if start_event_needs_one_outgoing_error:
+            final_error_messages.append("● Start Event must have 1 outgoing flow.")
+        
+        if end_event_min_count_error:
+            final_error_messages.append("● Expected at least 1 End Event, found 0.")
+        if end_event_needs_one_incoming_error: # This flag will be true if any end event fails
+            final_error_messages.append("● Each End Event must have 1 incoming flow.")
+        if end_event_needs_zero_outgoing_error: # This flag will be true if any end event fails
+            final_error_messages.append("● Each End Event must have 0 outgoing flows.")
 
-            if sese_reason and ((is_structural_for_pairing and gw.get('paired_gateway_id') is None and gw.get('loop_type') is None) or direction == 'undefined_or_complex'):
-                overall_passed = False
-                sese_violations.append(
-                    f"  - ID: {gw['id']}, Name: {gw.get('name') or gw['id']}, Type: {gw.get('gateway_type')}, Dir: {direction or 'N/A'}. Reason: {sese_reason}")
-
-        if unpaired_structural_gateways:
-            error_messages.append(
-                "Unpaired structural gateways (should form SESE/loops):")
-            error_messages.extend(unpaired_structural_gateways)
-        if sese_violations:
-            error_messages.append("Gateways violating SESE flow principles:")
-            error_messages.extend(sese_violations)
-
-        return overall_passed, error_messages
-
-
+        if gateway_invalid_flow_error:
+            if first_gateway_invalid_flow_example:
+                in_ex, out_ex = first_gateway_invalid_flow_example
+                final_error_messages.append(f"● A gateway has invalid flow counts (In: {in_ex}, Out: {out_ex}).")
+            else: # Fallback, though should be set if gateway_invalid_flow_error is true
+                final_error_messages.append("● One or more gateways have invalid flow configurations.")
+        
+        if unpaired_structural_gateway_error:
+            final_error_messages.append("● One or more structural gateways (Exclusive, Parallel, Inclusive) are not correctly paired or part of a loop.")
+        
+        if task_like_element_invalid_flow_error:
+            final_error_messages.append("● Tasks must have exactly 1 incoming and 1 outgoing flow.")
+        
+        overall_passed = not error_occurred
+        return overall_passed, final_error_messages
+    
 class BPMNTranslator:
     def __init__(self, bpmn_data: BPMNData):
         if not isinstance(bpmn_data, BPMNData):
@@ -1328,7 +1378,7 @@ class Bpmn2DcrConverter:
             if not overall_passed:
                 errors_str = "PYTHON_PRECONDITION_ERROR: BPMN precondition checks failed:\n" + \
                              "\n".join(
-                                 [f"  - {msg}" for msg in error_messages_list])
+                                 [f"  {msg}" for msg in error_messages_list])
                 return errors_str
         except Exception as e_precheck:
             return f"PYTHON_PRECHECK_ERROR_UNCAUGHT: {str(e_precheck)}\n{traceback.format_exc()}"
