@@ -493,17 +493,16 @@ class BPMNAnalyzer:
             return
         self._determine_gateway_directions()
 
-        all_gateways = [el for el_id, el in self.bpmn_data.elements.items(
-        ) if el['type'].endswith('Gateway')]
+        all_gateways = [el for el_id, el in self.bpmn_data.elements.items()
+                        if el['type'].endswith('Gateway')]
 
         for gw_element in all_gateways:
             gw_element.setdefault('loop_type', None)
 
-        paired_in_pass_loop = True
-        while paired_in_pass_loop:
-            paired_in_pass_loop = False
-            candidate_loops = []
+        while True:
+            made_a_pairing_in_this_pass = False
 
+            candidate_loops = []
             unpaired_exclusive_joins = [
                 gw for gw in all_gateways
                 if gw.get('gateway_type') == 'exclusive' and gw.get('gateway_direction') == 'join' and gw.get('paired_gateway_id') is None
@@ -521,7 +520,6 @@ class BPMNAnalyzer:
                     is_loop, body_nodes = self._check_loop_pairing_candidate(
                         j_gw_loop['id'], s_gw_loop['id'])
                     if is_loop:
-
                         contains_unpaired_gw_in_body = any(
                             (el_body := self.bpmn_data.get_element(node_id_body)) and
                             el_body['type'].endswith('Gateway') and
@@ -539,19 +537,15 @@ class BPMNAnalyzer:
                 best_j_id, best_s_id, _ = candidate_loops[0]
 
                 if self.bpmn_data.elements[best_j_id]['paired_gateway_id'] is None and \
-                   self.bpmn_data.elements[best_s_id]['paired_gateway_id'] is None:
-
+                        self.bpmn_data.elements[best_s_id]['paired_gateway_id'] is None:
                     self.bpmn_data.elements[best_j_id].update(
                         {'paired_gateway_id': best_s_id, 'loop_type': 'loop_entry_join'})
                     self.bpmn_data.elements[best_s_id].update(
                         {'paired_gateway_id': best_j_id, 'loop_type': 'loop_condition_split'})
-                    paired_in_pass_loop = True
+                    made_a_pairing_in_this_pass = True
+                    continue
 
-        paired_in_pass_sese = True
-        while paired_in_pass_sese:
-            paired_in_pass_sese = False
             candidate_sese_pairs = []
-
             unpaired_splits = [
                 gw for gw in all_gateways
                 if gw.get('gateway_direction') == 'split' and gw.get('paired_gateway_id') is None and gw.get('loop_type') is None
@@ -581,12 +575,14 @@ class BPMNAnalyzer:
                 best_s_id_sese, best_j_id_sese, _ = candidate_sese_pairs[0]
 
                 if self.bpmn_data.elements[best_s_id_sese]['paired_gateway_id'] is None and \
-                   self.bpmn_data.elements[best_j_id_sese]['paired_gateway_id'] is None:
-
+                        self.bpmn_data.elements[best_j_id_sese]['paired_gateway_id'] is None:
                     self.bpmn_data.elements[best_s_id_sese]['paired_gateway_id'] = best_j_id_sese
                     self.bpmn_data.elements[best_j_id_sese]['paired_gateway_id'] = best_s_id_sese
+                    made_a_pairing_in_this_pass = True
+                    continue
 
-                    paired_in_pass_sese = True
+            if not made_a_pairing_in_this_pass:
+                break
 
         self._populate_gateway_markings()
 
@@ -643,7 +639,7 @@ class BPMNAnalyzer:
             e for e_id, e in self.bpmn_data.elements.items() if e['type'] == 'startEvent']
         if len(start_events) != 1:
             overall_passed = False
-            msg = f"Expected exactly 1 Start Event, but found {len(start_events)}. [cite: 1]"
+            msg = f"Expected exactly 1 Start Event, but found {len(start_events)}."
             error_messages.append(msg)
             for e_idx, e_item in enumerate(start_events):
                 error_messages.append(
@@ -654,7 +650,7 @@ class BPMNAnalyzer:
         if not end_events:
             overall_passed = False
             error_messages.append(
-                "Expected at least 1 End Event, but found 0. [cite: 1]")
+                "Expected at least 1 End Event, but found 0.")
 
         gateways = [el for el_id, el in self.bpmn_data.elements.items(
         ) if el['type'].endswith('Gateway')]
@@ -679,9 +675,9 @@ class BPMNAnalyzer:
 
             reason_sese_violation = ""
             if direction == 'split' and not (num_in == 1 and num_out > 1):
-                reason_sese_violation = f"As 'split', should have 1 IN and >1 OUT. Actual - IN: {num_in}, OUT: {num_out}. [cite: 8]"
+                reason_sese_violation = f"As 'split', should have 1 IN and >1 OUT. Actual - IN: {num_in}, OUT: {num_out}."
             elif direction == 'join' and not (num_in > 1 and num_out == 1):
-                reason_sese_violation = f"As 'join', should have >1 IN and 1 OUT. Actual - IN: {num_in}, OUT: {num_out}. [cite: 8]"
+                reason_sese_violation = f"As 'join', should have >1 IN and 1 OUT. Actual - IN: {num_in}, OUT: {num_out}."
             elif direction == 'routing_decision_point':
 
                 if gw_check.get('gateway_type') in ['parallel', 'inclusive']:
@@ -721,6 +717,8 @@ class BPMNTranslator:
                                 process_name=dcr_process_name)
         self.bpmn_to_dcr_event_map = {}
         self.gateway_pair_suffixes = self._assign_gateway_pair_suffixes()
+        self.parallel_state_global_counter = 1
+        self.inclusive_state_global_counter = 1
 
     def _assign_gateway_pair_suffixes(self) -> dict:
         pair_suffixes_map = {}
@@ -784,52 +782,96 @@ class BPMNTranslator:
         return True
 
     def _get_or_create_helper_dcr_event(self, base_id_context: str, helper_type_prefix: str, dcr_label_text: str, dcr_initial_markings: set, unique_part_for_id=""):
-
         if not isinstance(unique_part_for_id, str):
             unique_part_for_id = str(unique_part_for_id)
 
-        final_dcr_label = dcr_label_text
-
+        event_dcr_id = ""
         if helper_type_prefix == "x_expr":
-
             expr_hash = hashlib.md5(
                 unique_part_for_id.encode()).hexdigest()[:8]
             event_dcr_id = f"expr_{base_id_context}_{expr_hash}"
-            final_dcr_label = unique_part_for_id
         else:
             event_dcr_id = f"{helper_type_prefix}_{base_id_context}{'_' + unique_part_for_id if unique_part_for_id else ''}"
 
-        if event_dcr_id not in self.dcr_data.events:
-            try:
-                self.dcr_data.add_event(
-                    event_dcr_id, final_dcr_label, dcr_initial_markings)
-
+        is_new_event = event_dcr_id not in self.dcr_data.events
+        try:
+            self.dcr_data.add_event(
+                event_dcr_id, dcr_label_text, dcr_initial_markings)
+            if is_new_event:
                 self.dcr_data.add_relation(
                     event_dcr_id, event_dcr_id, 'exclusion')
-            except ValueError as e:
-
-                return None
+        except ValueError as e:
+            return None
         return event_dcr_id
 
-    def _get_or_create_parallel_state_event(self, associated_gpj_bpmn_id: str) -> str:
+    def _get_or_create_parallel_state_event(self, associated_jn_minus_bpmn_id: str, associated_gpj_bpmn_id: str) -> str:
+        i = self.parallel_state_global_counter
+        self.parallel_state_global_counter += 1
 
-        return self._get_or_create_helper_dcr_event(associated_gpj_bpmn_id, "l_state_for_gpj", "Parallel State", {'i'})
+        pair_suffix = self.gateway_pair_suffixes.get(
+            associated_gpj_bpmn_id, "")
 
-    def _get_or_create_inclusive_state_event(self, associated_gij_bpmn_id: str) -> str:
+        base_label = f"Parallel State {i}"
+        if pair_suffix:
+            dcr_label_text = f"{base_label}\nGateway{pair_suffix}"
+        else:
+            dcr_label_text = base_label
 
-        return self._get_or_create_helper_dcr_event(associated_gij_bpmn_id, "n_state_for_gij", "Inclusive State", set())
+        return self._get_or_create_helper_dcr_event(
+            base_id_context=associated_jn_minus_bpmn_id,
+            helper_type_prefix="l_state_jn",
+            dcr_label_text=dcr_label_text,
+            dcr_initial_markings={'i'},
+            unique_part_for_id=str(i)
+        )
 
-    def _get_or_create_expression_event(self, expression_text: str, associated_flow_bpmn_id: str) -> str:
+    def _get_or_create_inclusive_state_event(self, associated_jn_minus_bpmn_id: str, associated_gij_bpmn_id: str) -> str:
+        i = self.inclusive_state_global_counter
+        self.inclusive_state_global_counter += 1
 
-        return self._get_or_create_helper_dcr_event(associated_flow_bpmn_id, "x_expr", expression_text, set(), unique_part_for_id=expression_text)
+        pair_suffix = self.gateway_pair_suffixes.get(
+            associated_gij_bpmn_id, "")
+
+        base_label = f"Inclusive State {i}"
+        if pair_suffix:
+            dcr_label_text = f"{base_label}\nGateway{pair_suffix}"
+        else:
+            dcr_label_text = base_label
+
+        return self._get_or_create_helper_dcr_event(
+            base_id_context=associated_jn_minus_bpmn_id,
+            helper_type_prefix="n_state_jn",
+            dcr_label_text=dcr_label_text,
+            dcr_initial_markings=set(),
+            unique_part_for_id=str(i)
+        )
+
+    def _get_or_create_expression_event(self, expression_text: str, associated_flow_bpmn_id: str, sequence_flow_name: str) -> str:
+        final_dcr_label = ""
+        id_hash_content = ""
+
+        stripped_expression = expression_text.strip()
+
+        if not stripped_expression:
+            final_dcr_label = sequence_flow_name if sequence_flow_name else f"Unnamed Flow Expr ({associated_flow_bpmn_id})"
+            id_hash_content = f"empty_expr_for_{associated_flow_bpmn_id}"
+        else:
+            final_dcr_label = stripped_expression
+            id_hash_content = stripped_expression
+
+        return self._get_or_create_helper_dcr_event(
+            associated_flow_bpmn_id,
+            "x_expr",
+            final_dcr_label,
+            set(),
+            unique_part_for_id=id_hash_content
+        )
 
     def map_bpmn_objects_to_dcr_events(self):
         if not self.bpmn_data or not self.bpmn_data.elements:
-
             return
 
         for bpmn_id, bpmn_element in self.bpmn_data.elements.items():
-
             dcr_event_id = bpmn_id
             final_label = ""
             base_label = ""
@@ -841,16 +883,12 @@ class BPMNTranslator:
                 initial_marking = {'p', 'i'}
             elif element_type == 'endEvent':
                 base_label = 'End Event'
-                initial_marking = set()
             elif bpmn_element.get('base_type') == 'task':
                 base_label = bpmn_element.get(
                     'name') or bpmn_element.get('label') or dcr_event_id
-                initial_marking = set()
             elif element_type and element_type.endswith('Gateway'):
-
                 gw_specific_type = bpmn_element.get('gateway_type', '')
                 gw_direction = bpmn_element.get('gateway_direction', '')
-
                 gw_specific_type_capitalized = gw_specific_type.capitalize(
                 ) if gw_specific_type else "Gateway"
                 gw_direction_capitalized = gw_direction.capitalize() if gw_direction else ""
@@ -861,12 +899,10 @@ class BPMNTranslator:
                     base_label = f"{gw_specific_type_capitalized} Gateway"
                 else:
                     base_label = "Gateway"
-                initial_marking = set()
 
                 pair_suffix = self.gateway_pair_suffixes.get(bpmn_id, "")
                 final_label = f"{base_label}{pair_suffix}"
             else:
-
                 continue
 
             if not final_label:
@@ -875,25 +911,21 @@ class BPMNTranslator:
             try:
                 self.dcr_data.add_event(
                     dcr_event_id, final_label, initial_marking)
-
                 if bpmn_id not in self.bpmn_to_dcr_event_map or self.bpmn_to_dcr_event_map[bpmn_id] != dcr_event_id:
                     self.bpmn_to_dcr_event_map[bpmn_id] = dcr_event_id
 
-                is_self_excluded = False
-                for rel in self.dcr_data.get_relations_for_event(dcr_event_id, as_source=True, as_target=True):
-                    if rel['source_id'] == dcr_event_id and rel['target_id'] == dcr_event_id and rel['type'] == 'exclusion':
-                        is_self_excluded = True
-                        break
+                is_self_excluded = any(
+                    rel['source_id'] == dcr_event_id and rel['target_id'] == dcr_event_id and rel['type'] == 'exclusion'
+                    for rel in self.dcr_data.get_relations_for_event(dcr_event_id, as_source=True, as_target=True)
+                )
                 if not is_self_excluded:
                     self.dcr_data.add_relation(
                         dcr_event_id, dcr_event_id, 'exclusion')
-
             except ValueError as e:
                 pass
 
     def generic_relation_mapping(self):
         if not self.bpmn_data or not self.bpmn_data.sequence_flows:
-
             return
 
         for flow_id, bpmn_flow in self.bpmn_data.sequence_flows.items():
@@ -901,51 +933,39 @@ class BPMNTranslator:
             target_bpmn_id = bpmn_flow.get('target_ref')
 
             if not source_bpmn_id or not target_bpmn_id:
-
                 continue
 
             source_element = self.bpmn_data.get_element(source_bpmn_id)
             target_element = self.bpmn_data.get_element(target_bpmn_id)
 
             if not source_element or not target_element:
-
                 continue
 
             source_dcr_id = self.bpmn_to_dcr_event_map.get(source_bpmn_id)
             target_dcr_id = self.bpmn_to_dcr_event_map.get(target_bpmn_id)
 
             if not source_dcr_id or not target_dcr_id:
-
                 continue
 
             apply_response_inclusion = False
-
             if source_element['type'] == 'startEvent':
                 apply_response_inclusion = True
-
             elif target_element['type'] == 'endEvent':
                 apply_response_inclusion = True
-
             elif self._is_common_task(source_bpmn_id) or self._is_common_task(target_bpmn_id):
-
                 if target_dcr_id in self.dcr_data.events and source_dcr_id in self.dcr_data.events:
                     apply_response_inclusion = True
-
             elif source_element.get('base_type') == 'task' and target_element.get('base_type') == 'task':
                 apply_response_inclusion = True
-
             elif source_element.get('gateway_direction') == 'join' and \
                     self._has_bpmn_marking(target_bpmn_id, "J+", associated_gateway_id=source_bpmn_id):
                 apply_response_inclusion = True
-
             elif target_element.get('gateway_direction') == 'split' and \
                     self._has_bpmn_marking(source_bpmn_id, "S-", associated_gateway_id=target_bpmn_id):
                 apply_response_inclusion = True
-
             elif source_element.get('gateway_direction') == 'split' and \
                     self._has_bpmn_marking(target_bpmn_id, "S+", associated_gateway_id=source_bpmn_id):
                 apply_response_inclusion = True
-
             elif target_element.get('gateway_direction') == 'join' and \
                     self._has_bpmn_marking(source_bpmn_id, "J-", associated_gateway_id=target_bpmn_id):
                 apply_response_inclusion = True
@@ -970,7 +990,6 @@ class BPMNTranslator:
                     continue
 
                 if bpmn_element.get('gateway_direction') == 'split':
-
                     s_plus_successors_bpmn_ids = []
                     for flow_id_succ in bpmn_element.get('outgoing_flow_ids', []):
                         flow_succ = self.bpmn_data.get_sequence_flow(
@@ -995,8 +1014,6 @@ class BPMNTranslator:
                             except ValueError as e:
                                 pass
 
-                pass
-
     def parallel_gateway_mapping(self):
         if not self.bpmn_data:
             return
@@ -1012,7 +1029,6 @@ class BPMNTranslator:
                     paired_gw_bpmn_id) if paired_gw_bpmn_id else None
 
                 if bpmn_element.get('gateway_direction') == 'split':
-
                     if paired_gw_dcr_id:
                         try:
                             self.dcr_data.add_relation(
@@ -1021,12 +1037,6 @@ class BPMNTranslator:
                             pass
 
                 elif bpmn_element.get('gateway_direction') == 'join':
-
-                    l_event_dcr_id = self._get_or_create_parallel_state_event(
-                        bpmn_id)
-                    if not l_event_dcr_id:
-                        continue
-
                     for flow_id_inc in bpmn_element.get('incoming_flow_ids', []):
                         flow_inc = self.bpmn_data.get_sequence_flow(
                             flow_id_inc)
@@ -1039,11 +1049,20 @@ class BPMNTranslator:
 
                             if pred_dcr_id and pred_element_details and \
                                self._has_bpmn_marking(predecessor_bpmn_id, "J-", associated_gateway_id=bpmn_id):
+
+                                l_event_dcr_id_for_this_jn = self._get_or_create_parallel_state_event(
+                                    associated_jn_minus_bpmn_id=predecessor_bpmn_id,
+                                    associated_gpj_bpmn_id=bpmn_id
+                                )
+                                if not l_event_dcr_id_for_this_jn:
+                                    continue
+
                                 try:
                                     self.dcr_data.add_relation(
-                                        pred_dcr_id, l_event_dcr_id, 'exclusion')
+                                        pred_dcr_id, l_event_dcr_id_for_this_jn, 'exclusion')
+
                                     self.dcr_data.add_relation(
-                                        pred_dcr_id, gateway_dcr_id, 'condition')
+                                        l_event_dcr_id_for_this_jn, gateway_dcr_id, 'condition')
                                     self.dcr_data.add_relation(
                                         pred_dcr_id, gateway_dcr_id, 'inclusion')
                                 except ValueError as e:
@@ -1064,7 +1083,6 @@ class BPMNTranslator:
                     paired_gw_bpmn_id) if paired_gw_bpmn_id else None
 
                 if bpmn_element.get('gateway_direction') == 'split':
-
                     if paired_gw_dcr_id:
                         try:
                             self.dcr_data.add_relation(
@@ -1085,27 +1103,25 @@ class BPMNTranslator:
                             if target_dcr_id and target_elem_details and \
                                self._has_bpmn_marking(target_bpmn_id, "S+", associated_gateway_id=bpmn_id):
 
-                                expression_text = flow_out.get('expression')
-                                if expression_text:
+                                expression_text_from_bpmn = flow_out.get(
+                                    'expression')
+                                sequence_flow_name = flow_out.get('name', '')
 
-                                    x_event_dcr_id = self._get_or_create_expression_event(
-                                        expression_text, flow_out['id'])
-                                    if x_event_dcr_id:
-                                        try:
-                                            self.dcr_data.add_relation(
-                                                x_event_dcr_id, target_dcr_id, 'response')
-                                            self.dcr_data.add_relation(
-                                                x_event_dcr_id, target_dcr_id, 'inclusion')
-                                        except ValueError as e:
-                                            pass
+                                x_event_dcr_id = self._get_or_create_expression_event(
+                                    expression_text_from_bpmn if expression_text_from_bpmn is not None else "",
+                                    flow_out['id'],
+                                    sequence_flow_name
+                                )
+                                if x_event_dcr_id:
+                                    try:
+                                        self.dcr_data.add_relation(
+                                            x_event_dcr_id, target_dcr_id, 'response')
+                                        self.dcr_data.add_relation(
+                                            x_event_dcr_id, target_dcr_id, 'inclusion')
+                                    except ValueError as e:
+                                        pass
 
                 elif bpmn_element.get('gateway_direction') == 'join':
-
-                    n_event_dcr_id = self._get_or_create_inclusive_state_event(
-                        bpmn_id)
-                    if not n_event_dcr_id:
-                        continue
-
                     for flow_id_in in bpmn_element.get('incoming_flow_ids', []):
                         flow_in = self.bpmn_data.get_sequence_flow(flow_id_in)
                         if flow_in:
@@ -1115,35 +1131,47 @@ class BPMNTranslator:
                             pred_element_details = self.bpmn_data.get_element(
                                 predecessor_bpmn_id)
 
+                            n_event_dcr_id_for_this_path = None
+
                             if pred_dcr_id and pred_element_details and \
                                self._has_bpmn_marking(predecessor_bpmn_id, "J-", associated_gateway_id=bpmn_id):
-                                try:
 
-                                    self.dcr_data.add_relation(
-                                        pred_dcr_id, n_event_dcr_id, 'exclusion')
-
-                                    self.dcr_data.add_relation(
-                                        pred_dcr_id, gateway_dcr_id, 'condition')
-
-                                    self.dcr_data.add_relation(
-                                        pred_dcr_id, gateway_dcr_id, 'inclusion')
-                                except ValueError as e:
-                                    pass
-
-                            expression_text_in = flow_in.get('expression')
-                            if expression_text_in:
-                                x_event_dcr_id_in = self._get_or_create_expression_event(
-                                    expression_text_in, flow_in['id'])
-                                if x_event_dcr_id_in:
+                                n_event_dcr_id_for_this_path = self._get_or_create_inclusive_state_event(
+                                    associated_jn_minus_bpmn_id=predecessor_bpmn_id,
+                                    associated_gij_bpmn_id=bpmn_id
+                                )
+                                if n_event_dcr_id_for_this_path:
                                     try:
-
                                         self.dcr_data.add_relation(
-                                            x_event_dcr_id_in, n_event_dcr_id, 'inclusion')
-
+                                            pred_dcr_id, n_event_dcr_id_for_this_path, 'exclusion')
                                         self.dcr_data.add_relation(
-                                            gateway_dcr_id, x_event_dcr_id_in, 'exclusion')
+                                            pred_dcr_id, gateway_dcr_id, 'condition')
+                                        self.dcr_data.add_relation(
+                                            pred_dcr_id, gateway_dcr_id, 'inclusion')
                                     except ValueError as e:
                                         pass
+
+                            expression_text_in_from_bpmn = flow_in.get(
+                                'expression')
+                            sequence_flow_name_in = flow_in.get('name', '')
+                            x_event_dcr_id_in = self._get_or_create_expression_event(
+                                expression_text_in_from_bpmn if expression_text_in_from_bpmn is not None else "",
+                                flow_in['id'],
+                                sequence_flow_name_in
+                            )
+
+                            if x_event_dcr_id_in:
+                                if n_event_dcr_id_for_this_path:
+                                    try:
+                                        self.dcr_data.add_relation(
+                                            x_event_dcr_id_in, n_event_dcr_id_for_this_path, 'inclusion')
+                                    except ValueError as e:
+                                        pass
+                                try:
+                                    self.dcr_data.add_relation(
+                                        gateway_dcr_id, x_event_dcr_id_in, 'exclusion')
+                                except ValueError as e:
+                                    pass
 
     def get_dcr_graph(self) -> DCRData:
         return self.dcr_data
@@ -1241,11 +1269,6 @@ class DCRExporter:
             'exclusion': 'exclude', 'inclusion': 'include',
             'milestone': 'milestone'
         }
-        relation_group_elements = {
-            rel_type: ET.SubElement(constraints_el, f"{rel_type}s" if rel_type not in [
-                                    'exclude', 'include'] else f"{rel_type}s")
-            for rel_type in self.dcr_data._valid_relation_types
-        }
 
         for rel_type_str_plural in ['conditions', 'responses', 'coresponces', 'excludes', 'includes', 'milestones', 'updates', 'spawns']:
             if not constraints_el.find(rel_type_str_plural):
@@ -1257,10 +1280,11 @@ class DCRExporter:
             target_id = rel['target_id']
 
             xml_tag_name = relation_xml_tag_map.get(rel_type_from_data)
+
             parent_group_el_name = f"{rel_type_from_data}s"
             if rel_type_from_data == "exclusion":
                 parent_group_el_name = "excludes"
-            if rel_type_from_data == "inclusion":
+            elif rel_type_from_data == "inclusion":
                 parent_group_el_name = "includes"
 
             parent_group_el = constraints_el.find(parent_group_el_name)
@@ -1296,63 +1320,179 @@ class DCRExporter:
 
 
 class Bpmn2DcrConverter:
-    def __init__(self):
+    def __init__(self, temp_bpmn_file_path=None, temp_dcr_file_path=None):
+        self.is_temp_files_managed_by_instance = False
 
-        self.temp_bpmn_file_path = "/tmp/input.bpmn"
-        self.temp_dcr_file_path = "/tmp/output.xml"
+        if temp_bpmn_file_path:
+            self.temp_bpmn_file_path = temp_bpmn_file_path
+        else:
+            try:
+                fd_bpmn, path_bpmn = tempfile.mkstemp(
+                    suffix=".bpmn", prefix="bpmn2dcr_local_input_")
+                os.close(fd_bpmn)
+                self.temp_bpmn_file_path = path_bpmn
+                self.is_temp_files_managed_by_instance = True
+            except Exception:
+
+                self.temp_bpmn_file_path = os.path.join(
+                    os.getcwd(), "bpmn2dcr_fallback_input.bpmn")
+
+        if temp_dcr_file_path:
+            self.temp_dcr_file_path = temp_dcr_file_path
+        else:
+            try:
+                fd_dcr, path_dcr = tempfile.mkstemp(
+                    suffix=".xml", prefix="bpmn2dcr_local_output_")
+                os.close(fd_dcr)
+                self.temp_dcr_file_path = path_dcr
+                self.is_temp_files_managed_by_instance = True
+            except Exception:
+                self.temp_dcr_file_path = os.path.join(
+                    os.getcwd(), "bpmn2dcr_fallback_output.xml")
 
     def translate(self, bpmn_xml_content: str) -> str:
         try:
-
-            with open(self.temp_bpmn_file_path, "w", encoding="utf-8") as f:
-                f.write(bpmn_xml_content)
+            try:
+                with open(self.temp_bpmn_file_path, "w", encoding="utf-8") as f:
+                    f.write(bpmn_xml_content)
+            except Exception as e_write_temp:
+                return f"PYTHON_WRITE_TEMP_BPMN_ERROR: {str(e_write_temp)}\n{traceback.format_exc()}"
 
             analyzer = BPMNAnalyzer()
-            load_success, load_error_msg = analyzer.load_from_xml(
-                self.temp_bpmn_file_path)
-            if not load_success:
-                return f"Error: Failed to load BPMN XML. {load_error_msg or ''}"
+            try:
 
-            analyzer.pair_gateways()
+                load_success, load_error_msg = analyzer.load_from_xml(
+                    self.temp_bpmn_file_path)
+                if not load_success:
+                    return f"PYTHON_LOAD_ERROR: Failed to load BPMN XML. {load_error_msg or ''}"
+            except Exception as e_load:
+                return f"PYTHON_LOAD_ERROR_UNCAUGHT: {str(e_load)}\n{traceback.format_exc()}"
 
-            overall_passed, error_messages_list = analyzer.perform_precondition_checks()
-            if not overall_passed:
-                errors_str = "Error: BPMN precondition checks failed:\n" + \
-                    "\n".join([f"  - {msg}" for msg in error_messages_list])
-                return errors_str
+            try:
+                analyzer.pair_gateways()
+            except Exception as e_pair:
+                return f"PYTHON_PAIR_GATEWAYS_ERROR: {str(e_pair)}\n{traceback.format_exc()}"
 
+            try:
+                overall_passed, error_messages_list = analyzer.perform_precondition_checks()
+                if not overall_passed:
+                    errors_str = "PYTHON_PRECONDITION_ERROR: BPMN precondition checks failed:\n" + \
+                        "\n".join(
+                            [f"  - {msg}" for msg in error_messages_list])
+                    return errors_str
+            except Exception as e_precheck:
+                return f"PYTHON_PRECHECK_ERROR_UNCAUGHT: {str(e_precheck)}\n{traceback.format_exc()}"
+
+            if analyzer.bpmn_data is None:
+                return "PYTHON_TRANSLATOR_ERROR: BPMNData not initialized by analyzer."
             translator = BPMNTranslator(analyzer.bpmn_data)
 
-            translator.map_bpmn_objects_to_dcr_events()
-
-            translator.generic_relation_mapping()
-            translator.exclusive_gateway_mapping()
-            translator.parallel_gateway_mapping()
-            translator.inclusive_gateway_mapping()
+            try:
+                translator.map_bpmn_objects_to_dcr_events()
+                translator.generic_relation_mapping()
+                translator.exclusive_gateway_mapping()
+                translator.parallel_gateway_mapping()
+                translator.inclusive_gateway_mapping()
+            except Exception as e_translate_rules:
+                return f"PYTHON_TRANSLATION_RULES_ERROR: {str(e_translate_rules)}\n{traceback.format_exc()}"
 
             dcr_graph_data = translator.get_dcr_graph()
-
+            if dcr_graph_data is None:
+                return "PYTHON_TRANSLATOR_ERROR: DCRData not generated by translator."
             exporter = DCRExporter(dcr_graph_data)
-            exporter.export_to_xml(self.temp_dcr_file_path)
 
-            with open(self.temp_dcr_file_path, "r", encoding="utf-8") as f_dcr:
-                dcr_xml_output_str = f_dcr.read()
+            try:
+                exporter.export_to_xml(self.temp_dcr_file_path)
+            except Exception as e_export:
+                return f"PYTHON_EXPORT_DCR_ERROR: {str(e_export)}\n{traceback.format_exc()}"
+
+            try:
+                with open(self.temp_dcr_file_path, "r", encoding="utf-8") as f_dcr:
+                    dcr_xml_output_str = f_dcr.read()
+            except Exception as e_read_dcr:
+                return f"PYTHON_READ_DCR_OUTPUT_ERROR: {str(e_read_dcr)}\n{traceback.format_exc()}"
 
             return dcr_xml_output_str
 
         except Exception as e_main:
-
             detailed_error = f"TRANSLATION_PIPELINE_ERROR: {str(e_main)}\n{traceback.format_exc()}"
             return detailed_error
         finally:
+            if self.is_temp_files_managed_by_instance:
+                if hasattr(self, 'temp_bpmn_file_path') and os.path.exists(self.temp_bpmn_file_path):
+                    try:
+                        os.remove(self.temp_bpmn_file_path)
+                    except OSError:
+                        pass
+                if hasattr(self, 'temp_dcr_file_path') and os.path.exists(self.temp_dcr_file_path):
+                    try:
+                        os.remove(self.temp_dcr_file_path)
+                    except OSError:
+                        pass
 
-            if os.path.exists(self.temp_bpmn_file_path):
-                try:
-                    os.remove(self.temp_bpmn_file_path)
-                except OSError:
-                    pass
-            if os.path.exists(self.temp_dcr_file_path):
-                try:
-                    os.remove(self.temp_dcr_file_path)
-                except OSError:
-                    pass
+
+def main():
+    converter = Bpmn2DcrConverter()
+    current_dir = os.getcwd()
+
+    print(f"Searching for .bpmn or .xml files in: {current_dir}")
+
+    files = [f for f in os.listdir(current_dir) if os.path.isfile(os.path.join(
+        current_dir, f)) and (f.lower().endswith(".bpmn") or f.lower().endswith(".xml"))]
+
+    if not files:
+        print("No .bpmn or .xml files found in the current directory.")
+        return
+
+    print("\nPlease select a file to convert by entering its number:")
+    for i, filename in enumerate(files):
+        print(f"{i + 1}. {filename}")
+
+    while True:
+        try:
+            choice = int(input("Enter file number: "))
+            if 1 <= choice <= len(files):
+                selected_file = files[choice - 1]
+                break
+            else:
+                print(
+                    f"Invalid choice. Please enter a number between 1 and {len(files)}.")
+        except ValueError:
+            print("Invalid input. Please enter a number.")
+
+    selected_file_path = os.path.join(current_dir, selected_file)
+    print(f"\nSelected file: {selected_file}")
+    print("Processing...")
+
+    try:
+        with open(selected_file_path, "r", encoding="utf-8") as f:
+            bpmn_xml_content = f.read()
+    except Exception as e:
+        print(f"Error reading file {selected_file_path}: {e}")
+        return
+
+    dcr_xml_output_str = converter.translate(bpmn_xml_content)
+
+    if dcr_xml_output_str.startswith("Error:") or \
+       dcr_xml_output_str.startswith("PYTHON_") or \
+       dcr_xml_output_str.startswith("TRANSLATION_PIPELINE_ERROR:"):
+        print("\nConversion failed with the following error:")
+        print(dcr_xml_output_str)
+    else:
+        base, ext = os.path.splitext(selected_file)
+        output_filename = f"{base}_dcr_output.xml"
+        output_file_path = os.path.join(current_dir, output_filename)
+
+        try:
+            with open(output_file_path, "w", encoding="utf-8") as f:
+                f.write(dcr_xml_output_str)
+            print(f"\nConversion successful!")
+            print(f"DCR XML output saved to: {output_file_path}")
+        except Exception as e:
+            print(f"\nError writing output file {output_file_path}: {e}")
+            print("\nConverted DCR XML (displaying due to save error):")
+            print(dcr_xml_output_str)
+
+
+if __name__ == "__main__":
+    main()
