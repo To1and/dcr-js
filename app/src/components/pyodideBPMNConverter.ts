@@ -1,4 +1,5 @@
-import b2dCoreCode from '../resources/bpmn2dcr_core.py?raw';
+
+import b2dCoreCode from '../resources/bpmn2dcr.py?raw'; 
 
 export const convertBPMNToDCRWithPyodide = async (bpmnContent: string): Promise<string> => {
   try {
@@ -7,30 +8,36 @@ export const convertBPMNToDCRWithPyodide = async (bpmnContent: string): Promise<
       indexURL: 'https://cdn.jsdelivr.net/pyodide/v0.27.5/full/'
     });
     
-    pyodide.runPython(b2dCoreCode);
+    pyodide.runPython(b2dCoreCode); 
+    
     pyodide.globals.set("bpmn_content", bpmnContent);
     
+
     pyodide.runPython(`
-
-input_file = "/tmp/input.bpmn"
-output_file = "/tmp/output.xml"
+import traceback
 
 
-with open(input_file, "w") as f:
-    f.write(bpmn_content)
+converter = Bpmn2DcrConverter()
+dcr_output = ""
 
+try:
 
-translator = Translator()
-translator.translate_bpmn_to_dcr(input_file, output_file)
+    dcr_output = converter.translate(bpmn_content)
+except Exception as e:
+    dcr_output = f"PYTHON_CONVERTER_UNHANDLED_ERROR: {str(e)}\\n{traceback.format_exc()}"
 
-
-with open(output_file, "r") as f:
-    dcr_content = f.read()
+dcr_result_from_python = dcr_output
 `);
     
-    return pyodide.globals.get('dcr_content');
+
+    return pyodide.globals.get('dcr_result_from_python');
+
   } catch (error) {
-    console.error('Error in BPMN to DCR conversion:', error);
-    throw error;
+    console.error('Error in BPMN to DCR conversion (Pyodide setup or execution):', error);
+
+    if (error instanceof Error) {
+        return `PYODIDE_SETUP_ERROR: ${error.message}\n${error.stack}`;
+    }
+    return `PYODIDE_SETUP_UNKNOWN_ERROR: ${String(error)}`;
   }
 };
